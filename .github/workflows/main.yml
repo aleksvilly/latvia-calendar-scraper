@@ -2,7 +2,7 @@ name: Scrape calendar dates
 
 on:
   schedule:
-    - cron: "* * * * *"   # every 1 minute
+    - cron: "* * * * *"
   workflow_dispatch:
 
 jobs:
@@ -12,27 +12,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch and extract dates
+      - name: Fetch and extract dates safely
         run: |
           mkdir -p data
 
-          # function to fetch and extract
           fetch_and_extract() {
             URL=$1
             FILE=$2
 
-            # fetch raw JSON
-            RAW=$(curl -s -H "Accept: application/json" \
-              -H "User-Agent: Mozilla/5.0" "$URL")
+            RAW=$(curl -s \
+              -H "Accept: application/json" \
+              -H "User-Agent: Mozilla/5.0" \
+              "$URL")
 
-            # extract availableDates values into simple JSON list
+            # If response is NOT JSON → save empty list
+            if ! echo "$RAW" | jq . >/dev/null 2>&1; then
+              echo "[]" > data/$FILE
+              return
+            fi
+
+            # If availableDates missing or null → empty list
             echo "$RAW" \
-              | jq -r '.availableDates | map(.date) ' \
+              | jq -c '[.availableDates[]?.date]' \
               > data/$FILE
           }
 
-          fetch_and_extract "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=2" "dates-2026-02.json"
-          fetch_and_extract "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=3" "dates-2026-03.json"
+          fetch_and_extract \
+            "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=2" \
+            "dates-2026-02.json"
+
+          fetch_and_extract \
+            "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=3" \
+            "dates-2026-03.json"
 
       - name: Commit data
         run: |
