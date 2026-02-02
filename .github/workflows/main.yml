@@ -1,4 +1,4 @@
-name: Scrape calendar dates (history)
+name: Scrape calendar dates (compressed history)
 
 on:
   schedule:
@@ -12,11 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch and append dates
+      - name: Fetch and compress history
         run: |
           mkdir -p data
 
-          append_with_timestamp() {
+          process_url() {
             URL=$1
             FILE=$2
             NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -26,38 +26,52 @@ jobs:
               -H "User-Agent: Mozilla/5.0" \
               "$URL")
 
-            # Extract value or return empty array
             if echo "$RAW" | jq . >/dev/null 2>&1; then
               VALUE=$(echo "$RAW" | jq -c '[.availableDates[]?.date]')
             else
               VALUE="[]"
             fi
 
-            # Initialize file if missing
+            # init file
             if [ ! -f "data/$FILE" ]; then
               echo "[]" > data/$FILE
             fi
 
-            # Append object {time, value}
-            jq --arg time "$NOW" --argjson value "$VALUE" \
-              '. += [{"time": $time, "value": $value}]' \
-              data/$FILE > data/tmp.json
+            LAST_VALUE=$(jq -c '.[-1].value // empty' data/$FILE)
+
+            if [ "$VALUE" = "[]" ] && [ "$LAST_VALUE" = "[]" ]; then
+              # merge empty blocks
+              jq --arg now "$NOW" '
+                .[-1].last_scrap = $now
+                | .[-1].count += 1
+              ' data/$FILE > data/tmp.json
+            else
+              # append new block
+              jq --arg now "$NOW" --argjson value "$VALUE" '
+                . += [{
+                  start_scrap: $now,
+                  last_scrap: $now,
+                  count: 1,
+                  value: $value
+                }]
+              ' data/$FILE > data/tmp.json
+            fi
 
             mv data/tmp.json data/$FILE
           }
 
-          append_with_timestamp \
+          process_url \
             "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=2" \
             "dates-2026-02-history.json"
 
-          append_with_timestamp \
+          process_url \
             "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=3" \
             "dates-2026-03-history.json"
 
-      - name: Commit history
+      - name: Commit compressed history
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add data
-          git commit -m "Append calendar snapshot" || echo "No changes"
+          git commit -m "Update compressed calendar history" || echo "No changes"
           git push
