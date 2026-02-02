@@ -1,4 +1,4 @@
-name: Scrape calendar dates
+name: Scrape calendar dates (history)
 
 on:
   schedule:
@@ -12,43 +12,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch and extract dates safely
+      - name: Fetch and append dates
         run: |
           mkdir -p data
 
-          fetch_and_extract() {
+          append_with_timestamp() {
             URL=$1
             FILE=$2
+            NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
             RAW=$(curl -s \
               -H "Accept: application/json" \
               -H "User-Agent: Mozilla/5.0" \
               "$URL")
 
-            # If response is NOT JSON → save empty list
-            if ! echo "$RAW" | jq . >/dev/null 2>&1; then
-              echo "[]" > data/$FILE
-              return
+            # Extract value or return empty array
+            if echo "$RAW" | jq . >/dev/null 2>&1; then
+              VALUE=$(echo "$RAW" | jq -c '[.availableDates[]?.date]')
+            else
+              VALUE="[]"
             fi
 
-            # If availableDates missing or null → empty list
-            echo "$RAW" \
-              | jq -c '[.availableDates[]?.date]' \
-              > data/$FILE
+            # Initialize file if missing
+            if [ ! -f "data/$FILE" ]; then
+              echo "[]" > data/$FILE
+            fi
+
+            # Append object {time, value}
+            jq --arg time "$NOW" --argjson value "$VALUE" \
+              '. += [{"time": $time, "value": $value}]' \
+              data/$FILE > data/tmp.json
+
+            mv data/tmp.json data/$FILE
           }
 
-          fetch_and_extract \
+          append_with_timestamp \
             "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=2" \
-            "dates-2026-02.json"
+            "dates-2026-02-history.json"
 
-          fetch_and_extract \
+          append_with_timestamp \
             "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=3" \
-            "dates-2026-03.json"
+            "dates-2026-03-history.json"
 
-      - name: Commit data
+      - name: Commit history
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add data
-          git commit -m "Update calendar dates" || echo "No changes"
+          git commit -m "Append calendar snapshot" || echo "No changes"
           git push
