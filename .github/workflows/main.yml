@@ -1,77 +1,104 @@
-name: Scrape calendar dates (compressed history)
+# .github/workflows/check-latvian-appointments.yml
+
+name: Check Egypt → Latvia appointment slots
 
 on:
   schedule:
-    - cron: "* * * * *"
-  workflow_dispatch:
+    - cron: '17 */3 * * *'          # every 3 hours at :17
+  workflow_dispatch:                # allow manual trigger
 
 jobs:
-  scrape:
+  check-appointments:
     runs-on: ubuntu-latest
+    container: mcr.microsoft.com/playwright/python:v1.49.0-noble  # ← or :latest / :v1.50.0-noble etc.
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Fetch and compress history
+      - name: Write script & secrets to file
+        env:
+          TELEGRAM_TOKEN:     ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          mkdir -p data
+          cat > check.py << 'EOF'
+          import traceback
+          import requests
+          from playwright.sync_api import sync_playwright
+          import os
 
-          process_url() {
-            URL=$1
-            FILE=$2
-            NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN")
+          TELEGRAM_CHAT_ID  = os.getenv("TELEGRAM_CHAT_ID")
 
-            RAW=$(curl -s \
-              -H "Accept: application/json" \
-              -H "User-Agent: Mozilla/5.0" \
-              "$URL")
+          def notify_telegram(message: str):
+              if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+                  print("Missing Telegram token/chat_id →", message)
+                  return
+              url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+              try:
+                  requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=10)
+              except Exception as e:
+                  print("Telegram notify failed:", e)
 
-            if echo "$RAW" | jq . >/dev/null 2>&1; then
-              VALUE=$(echo "$RAW" | jq -c '[.availableDates[]?.date]')
-            else
-              VALUE="[]"
-            fi
+          def run(playwright):
+              try:
+                  browser = playwright.chromium.launch(headless=True)
+                  context = browser.new_context(viewport={"width": 762, "height": 695})
+                  page = context.new_page()
 
-            # init file
-            if [ ! -f "data/$FILE" ]; then
-              echo "[]" > data/$FILE
-            fi
+                  page.goto("https://pieraksts.mfa.gov.lv/en/egypt/index", wait_until="networkidle")
 
-            LAST_VALUE=$(jq -c '.[-1].value // empty' data/$FILE)
+                  page.fill('#Persons\\[0\\]\\[first_name\\]', 'xxemple')
+                  page.fill('#Persons\\[0\\]\\[last_name\\]', 'rd2000')
+                  page.fill('#e_mail', 'example@gmail.com')
+                  page.fill('#e_mail_repeat', 'example@gmail.com')
+                  page.fill('#phone', '+212666666666')
 
-            if [ "$VALUE" = "[]" ] && [ "$LAST_VALUE" = "[]" ]; then
-              # merge empty blocks
-              jq --arg now "$NOW" '
-                .[-1].last_scrap = $now
-                | .[-1].count += 1
-              ' data/$FILE > data/tmp.json
-            else
-              # append new block
-              jq --arg now "$NOW" --argjson value "$VALUE" '
-                . += [{
-                  start_scrap: $now,
-                  last_scrap: $now,
-                  count: 1,
-                  value: $value
-                }]
-              ' data/$FILE > data/tmp.json
-            fi
+                  page.click('#step1-next-btn > button')
+                  page.wait_for_url("**/step2", timeout=25000)
 
-            mv data/tmp.json data/$FILE
-          }
+                  page.click("div.form-services--title")
+                  page.click("div.services--wrapper > div:nth-of-type(1) > span")
+                  page.click("section.active span")
+                  page.click("section.active > div.description-text--wrapper button")
 
-          process_url \
-            "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=2" \
-            "dates-2026-02-history.json"
+                  page.click("#step2-next-btn > button")
 
-          process_url \
-            "https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2026&month=3" \
-            "dates-2026-03-history.json"
+                  # ── Check availability ───────────────────────────────────────
+                  available_response = page.evaluate("""async () => {
+                      const res = await fetch('https://pieraksts.mfa.gov.lv/en/calendar/available-month-dates?year=2025&month=6', {
+                          method: 'GET',
+                          credentials: 'same-origin'
+                      });
+                      return await res.text();
+                  }""")
 
-      - name: Commit compressed history
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add data
-          git commit -m "Update compressed calendar history" || echo "No changes"
-          git push
+                  notify_telegram("📅 Response from available-month-dates:\\n" + available_response)
+
+                  last_date = page.evaluate("""async () => {
+                      const res = await fetch('https://pieraksts.mfa.gov.lv/en/calendar/last-available-date', {
+                          method: 'GET',
+                          credentials: 'same-origin'
+                      });
+                      return await res.text();
+                  }""")
+
+                  notify_telegram("🕓 Last available date:\\n" + last_date)
+
+                  if "Currently all dates are fully booked" in available_response:
+                      notify_telegram("❌ Aucun créneau disponible pour juin 2025.")
+                  else:
+                      notify_telegram("✅ Des créneaux peuvent être disponibles !\\nVérifiez manuellement.")
+
+              except Exception as e:
+                  error_message = f"❌ Playwright error:\\n{str(e)}\\n\\n{traceback.format_exc()}"
+                  notify_telegram(error_message)
+                  raise  # let GH show failed status
+
+          if __name__ == "__main__":
+              with sync_playwright() as p:
+                  run(p)
+          EOF
+
+      - name: Run appointment checker
+        run: python check.py
